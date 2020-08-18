@@ -1,4 +1,4 @@
-// Copyright 2016 PingCAP, Inc.
+// Copyright 2016 TiKV Project Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,12 +25,13 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
-	"github.com/pingcap/pd/v4/pkg/mock/mockid"
-	"github.com/pingcap/pd/v4/server/config"
-	"github.com/pingcap/pd/v4/server/core"
-	"github.com/pingcap/pd/v4/server/id"
-	"github.com/pingcap/pd/v4/server/kv"
-	"github.com/pingcap/pd/v4/server/schedule/opt"
+	"github.com/tikv/pd/pkg/mock/mockid"
+	"github.com/tikv/pd/server/config"
+	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/id"
+	"github.com/tikv/pd/server/kv"
+	"github.com/tikv/pd/server/schedule/opt"
+	"github.com/tikv/pd/server/versioninfo"
 )
 
 func Test(t *testing.T) {
@@ -48,6 +49,7 @@ func (s *testClusterInfoSuite) TestStoreHeartbeat(c *C) {
 
 	n, np := uint64(3), uint64(3)
 	stores := newTestStores(n)
+	storeMetasAfterHeartbeat := make([]*metapb.Store, 0, n)
 	regions := newTestRegions(n, np)
 
 	for _, region := range regions {
@@ -74,16 +76,18 @@ func (s *testClusterInfoSuite) TestStoreHeartbeat(c *C) {
 		s := cluster.GetStore(store.GetID())
 		c.Assert(s.GetLastHeartbeatTS().UnixNano(), Not(Equals), int64(0))
 		c.Assert(s.GetStoreStats(), DeepEquals, storeStats)
+
+		storeMetasAfterHeartbeat = append(storeMetasAfterHeartbeat, s.GetMeta())
 	}
 
 	c.Assert(cluster.GetStoreCount(), Equals, int(n))
 
-	for _, store := range stores {
+	for i, store := range stores {
 		tmp := &metapb.Store{}
 		ok, err := cluster.storage.LoadStore(store.GetID(), tmp)
 		c.Assert(ok, IsTrue)
 		c.Assert(err, IsNil)
-		c.Assert(tmp, DeepEquals, store.GetMeta())
+		c.Assert(tmp, DeepEquals, storeMetasAfterHeartbeat[i])
 	}
 }
 
@@ -333,13 +337,13 @@ func (s *testClusterInfoSuite) TestConcurrentRegionHeartbeat(c *C) {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	c.Assert(failpoint.Enable("github.com/pingcap/pd/v4/server/cluster/concurrentRegionHeartbeat", "return(true)"), IsNil)
+	c.Assert(failpoint.Enable("github.com/tikv/pd/server/cluster/concurrentRegionHeartbeat", "return(true)"), IsNil)
 	go func() {
 		defer wg.Done()
 		cluster.processRegionHeartbeat(source)
 	}()
 	time.Sleep(100 * time.Millisecond)
-	c.Assert(failpoint.Disable("github.com/pingcap/pd/v4/server/cluster/concurrentRegionHeartbeat"), IsNil)
+	c.Assert(failpoint.Disable("github.com/tikv/pd/server/cluster/concurrentRegionHeartbeat"), IsNil)
 	c.Assert(cluster.processRegionHeartbeat(target), IsNil)
 	wg.Wait()
 	checkRegion(c, cluster.GetRegionByKey([]byte{}), target)
@@ -491,15 +495,15 @@ func (s *testStoresInfoSuite) TestStores(c *C) {
 	for i, store := range stores {
 		id := store.GetID()
 		c.Assert(cache.GetStore(id), IsNil)
-		c.Assert(cache.BlockStore(id), NotNil)
+		c.Assert(cache.PauseLeaderTransfer(id), NotNil)
 		cache.SetStore(store)
 		c.Assert(cache.GetStore(id), DeepEquals, store)
 		c.Assert(cache.GetStoreCount(), Equals, i+1)
-		c.Assert(cache.BlockStore(id), IsNil)
-		c.Assert(cache.GetStore(id).IsBlocked(), IsTrue)
-		c.Assert(cache.BlockStore(id), NotNil)
-		cache.UnblockStore(id)
-		c.Assert(cache.GetStore(id).IsBlocked(), IsFalse)
+		c.Assert(cache.PauseLeaderTransfer(id), IsNil)
+		c.Assert(cache.GetStore(id).AllowLeaderTransfer(), IsFalse)
+		c.Assert(cache.PauseLeaderTransfer(id), NotNil)
+		cache.ResumeLeaderTransfer(id)
+		c.Assert(cache.GetStore(id).AllowLeaderTransfer(), IsTrue)
 	}
 	c.Assert(cache.GetStoreCount(), Equals, int(n))
 
@@ -660,7 +664,7 @@ func newTestScheduleConfig() (*config.ScheduleConfig, *config.PersistOptions, er
 		return nil, nil, err
 	}
 	opt := config.NewPersistOptions(cfg)
-	opt.SetClusterVersion(MinSupportedVersion(Version2_0))
+	opt.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version2_0))
 	return &cfg.Schedule, opt, nil
 }
 

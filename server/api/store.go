@@ -1,4 +1,4 @@
-// Copyright 2016 PingCAP, Inc.
+// Copyright 2016 TiKV Project Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,13 +22,13 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/pingcap/errcode"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/pingcap/pd/v4/pkg/apiutil"
-	"github.com/pingcap/pd/v4/pkg/typeutil"
-	"github.com/pingcap/pd/v4/server"
-	"github.com/pingcap/pd/v4/server/config"
-	"github.com/pingcap/pd/v4/server/core"
-	"github.com/pingcap/pd/v4/server/schedule/storelimit"
 	"github.com/pkg/errors"
+	"github.com/tikv/pd/pkg/apiutil"
+	"github.com/tikv/pd/pkg/typeutil"
+	"github.com/tikv/pd/server"
+	"github.com/tikv/pd/server/config"
+	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/schedule/storelimit"
 	"github.com/unrolled/render"
 )
 
@@ -195,7 +195,7 @@ func (h *storeHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.rd.JSON(w, http.StatusOK, nil)
+	h.rd.JSON(w, http.StatusOK, "The store is set as Offline or Tombstone.")
 }
 
 // @Tags store
@@ -230,7 +230,7 @@ func (h *storeHandler) SetState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.rd.JSON(w, http.StatusOK, nil)
+	h.rd.JSON(w, http.StatusOK, "The store's state is updated.")
 }
 
 // FIXME: details of input json body params
@@ -276,7 +276,7 @@ func (h *storeHandler) SetLabels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.rd.JSON(w, http.StatusOK, nil)
+	h.rd.JSON(w, http.StatusOK, "The store's label is updated.")
 }
 
 // FIXME: details of input json body params
@@ -329,7 +329,7 @@ func (h *storeHandler) SetWeight(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.rd.JSON(w, http.StatusOK, nil)
+	h.rd.JSON(w, http.StatusOK, "The store's label is updated.")
 }
 
 // FIXME: details of input json body params
@@ -368,8 +368,8 @@ func (h *storeHandler) SetLimit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ratePerMin, ok := rateVal.(float64)
-	if !ok || ratePerMin < 0 {
-		h.rd.JSON(w, http.StatusBadRequest, "badformat rate")
+	if !ok || ratePerMin <= 0 {
+		h.rd.JSON(w, http.StatusBadRequest, "invalid rate which should be larger than 0")
 		return
 	}
 
@@ -386,7 +386,7 @@ func (h *storeHandler) SetLimit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	h.rd.JSON(w, http.StatusOK, nil)
+	h.rd.JSON(w, http.StatusOK, "The store's label is updated.")
 }
 
 type storesHandler struct {
@@ -404,7 +404,7 @@ func newStoresHandler(handler *server.Handler, rd *render.Render) *storesHandler
 // @Tags store
 // @Summary Remove tombstone records in the cluster.
 // @Produce json
-// @Success 200 {string} string "Remove tomestone success."
+// @Success 200 {string} string "Remove tomestone successfully."
 // @Failure 500 {string} string "PD server failed to proceed the request."
 // @Router /stores/remove-tombstone [delete]
 func (h *storesHandler) RemoveTombStone(w http.ResponseWriter, r *http.Request) {
@@ -415,7 +415,7 @@ func (h *storesHandler) RemoveTombStone(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	h.rd.JSON(w, http.StatusOK, nil)
+	h.rd.JSON(w, http.StatusOK, "Remove tomestone successfully.")
 }
 
 // FIXME: details of input json body params
@@ -424,7 +424,7 @@ func (h *storesHandler) RemoveTombStone(w http.ResponseWriter, r *http.Request) 
 // @Accept json
 // @Param body body object true "json params"
 // @Produce json
-// @Success 200 {string} string "Set store limit success."
+// @Success 200 {string} string "Set store limit successfully."
 // @Failure 400 {string} string "The input is invalid."
 // @Failure 500 {string} string "PD server failed to proceed the request."
 // @Router /stores/limit [post]
@@ -440,8 +440,8 @@ func (h *storesHandler) SetAllLimit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ratePerMin, ok := rateVal.(float64)
-	if !ok || ratePerMin < 0 {
-		h.rd.JSON(w, http.StatusBadRequest, "badformat rate")
+	if !ok || ratePerMin <= 0 {
+		h.rd.JSON(w, http.StatusBadRequest, "invalid rate which should be larger than 0")
 		return
 	}
 
@@ -458,18 +458,41 @@ func (h *storesHandler) SetAllLimit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	h.rd.JSON(w, http.StatusOK, nil)
+	h.rd.JSON(w, http.StatusOK, "Set store limit successfully.")
 }
 
 // FIXME: details of output json body
 // @Tags store
 // @Summary Get limit of all stores in the cluster.
+// @Param include_tombstone query bool false "include Tombstone" default(false)
 // @Produce json
 // @Success 200 {object} string
 // @Failure 500 {string} string "PD server failed to proceed the request."
 // @Router /stores/limit [get]
 func (h *storesHandler) GetAllLimit(w http.ResponseWriter, r *http.Request) {
 	limits := h.GetScheduleConfig().StoreLimit
+	includeTombstone := false
+	var err error
+	if includeStr := r.URL.Query().Get("include_tombstone"); includeStr != "" {
+		includeTombstone, err = strconv.ParseBool(includeStr)
+		if err != nil {
+			h.rd.JSON(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if !includeTombstone {
+		returned := make(map[uint64]config.StoreLimitConfig, len(limits))
+		rc := getCluster(r.Context())
+		for storeID, v := range limits {
+			store := rc.GetStore(storeID)
+			if store == nil || store.IsTombstone() {
+				continue
+			}
+			returned[storeID] = v
+		}
+		h.rd.JSON(w, http.StatusOK, returned)
+		return
+	}
 	h.rd.JSON(w, http.StatusOK, limits)
 }
 
@@ -478,7 +501,7 @@ func (h *storesHandler) GetAllLimit(w http.ResponseWriter, r *http.Request) {
 // @Accept json
 // @Param body body storelimit.Scene true "Store limit scene"
 // @Produce json
-// @Success 200 {string} string "Set store limit scene success."
+// @Success 200 {string} string "Set store limit scene successfully."
 // @Failure 400 {string} string "The input is invalid."
 // @Failure 500 {string} string "PD server failed to proceed the request."
 // @Router /stores/limit/scene [post]
@@ -494,13 +517,13 @@ func (h *storesHandler) SetStoreLimitScene(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	h.Handler.SetStoreLimitScene(scene, typeValue)
-	h.rd.JSON(w, http.StatusOK, nil)
+	h.rd.JSON(w, http.StatusOK, "Set store limit scene successfully.")
 }
 
 // @Tags store
 // @Summary Get limit scene in the cluster.
 // @Produce json
-// @Success 200 {string} string "Set store limit scene success."
+// @Success 200 {string} string "Set store limit scene successfully."
 // @Router /stores/limit/scene [get]
 func (h *storesHandler) GetStoreLimitScene(w http.ResponseWriter, r *http.Request) {
 	typeName := r.URL.Query().Get("type")

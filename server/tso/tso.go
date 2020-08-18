@@ -1,4 +1,4 @@
-// Copyright 2016 PingCAP, Inc.
+// Copyright 2016 TiKV Project Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,12 +22,12 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
-	"github.com/pingcap/pd/v4/pkg/etcdutil"
-	"github.com/pingcap/pd/v4/pkg/tsoutil"
-	"github.com/pingcap/pd/v4/pkg/typeutil"
-	"github.com/pingcap/pd/v4/server/kv"
-	"github.com/pingcap/pd/v4/server/member"
 	"github.com/pkg/errors"
+	"github.com/tikv/pd/pkg/errs"
+	"github.com/tikv/pd/pkg/etcdutil"
+	"github.com/tikv/pd/pkg/tsoutil"
+	"github.com/tikv/pd/pkg/typeutil"
+	"github.com/tikv/pd/server/election"
 	"go.etcd.io/etcd/clientv3"
 	"go.uber.org/zap"
 )
@@ -41,11 +41,13 @@ const (
 
 // TimestampOracle is used to maintain the logic of tso.
 type TimestampOracle struct {
+	// leadership is used to check the current PD server's leadership
+	// to determine whether a tso request could be processed and
+	// it's stored as *election.Leadership
+	leadership atomic.Value
 	// For tso, set after pd becomes leader.
 	ts            unsafe.Pointer
 	lastSavedTime atomic.Value
-	lease         *member.LeaderLease
-
 	rootPath      string
 	member        string
 	client        *clientv3.Client
@@ -63,6 +65,18 @@ func NewTimestampOracle(client *clientv3.Client, rootPath string, member string,
 		maxResetTSGap: maxResetTSGap,
 		member:        member,
 	}
+}
+
+func (t *TimestampOracle) getLeadership() *election.Leadership {
+	leadership := t.leadership.Load()
+	if leadership == nil {
+		return nil
+	}
+	return leadership.(*election.Leadership)
+}
+
+func (t *TimestampOracle) setLeadership(leadership *election.Leadership) {
+	t.leadership.Store(leadership)
 }
 
 type atomicObject struct {
@@ -88,12 +102,13 @@ func (t *TimestampOracle) loadTimestamp() (time.Time, error) {
 // save timestamp, if lastTs is 0, we think the timestamp doesn't exist, so create it,
 // otherwise, update it.
 func (t *TimestampOracle) saveTimestamp(ts time.Time) error {
-	data := typeutil.Uint64ToBytes(uint64(ts.UnixNano()))
 	key := t.getTimestampPath()
-
+	data := typeutil.Uint64ToBytes(uint64(ts.UnixNano()))
 	leaderPath := path.Join(t.rootPath, "leader")
-	txn := kv.NewSlowLogTxn(t.client).If(append([]clientv3.Cmp{}, clientv3.Compare(clientv3.Value(leaderPath), "=", t.member))...)
-	resp, err := txn.Then(clientv3.OpPut(key, string(data))).Commit()
+	resp, err := t.getLeadership().
+		LeaderTxn(clientv3.Compare(clientv3.Value(leaderPath), "=", t.member)).
+		Then(clientv3.OpPut(key, string(data))).
+		Commit()
 	if err != nil {
 		return errors.WithStack(err)
 	}
@@ -107,8 +122,14 @@ func (t *TimestampOracle) saveTimestamp(ts time.Time) error {
 }
 
 // SyncTimestamp is used to synchronize the timestamp.
-func (t *TimestampOracle) SyncTimestamp(lease *member.LeaderLease) error {
+func (t *TimestampOracle) SyncTimestamp(leadership *election.Leadership) error {
 	tsoCounter.WithLabelValues("sync").Inc()
+
+	t.setLeadership(leadership)
+
+	failpoint.Inject("delaySyncTimestamp", func() {
+		time.Sleep(time.Second)
+	})
 
 	last, err := t.loadTimestamp()
 	if err != nil {
@@ -123,7 +144,7 @@ func (t *TimestampOracle) SyncTimestamp(lease *member.LeaderLease) error {
 	// If the current system time minus the saved etcd timestamp is less than `updateTimestampGuard`,
 	// the timestamp allocation will start from the saved etcd timestamp temporarily.
 	if typeutil.SubTimeByWallClock(next, last) < updateTimestampGuard {
-		log.Error("system time may be incorrect", zap.Time("last", last), zap.Time("next", next))
+		log.Error("system time may be incorrect", zap.Time("last", last), zap.Time("next", next), zap.Error(errs.ErrIncorrectSystemTime.FastGenByArgs()))
 		next = last.Add(updateTimestampGuard)
 	}
 
@@ -139,7 +160,6 @@ func (t *TimestampOracle) SyncTimestamp(lease *member.LeaderLease) error {
 	current := &atomicObject{
 		physical: next,
 	}
-	t.lease = lease
 	atomic.StorePointer(&t.ts, unsafe.Pointer(current))
 
 	return nil
@@ -147,7 +167,7 @@ func (t *TimestampOracle) SyncTimestamp(lease *member.LeaderLease) error {
 
 // ResetUserTimestamp update the physical part with specified tso.
 func (t *TimestampOracle) ResetUserTimestamp(tso uint64) error {
-	if t.lease == nil || t.lease.IsExpired() {
+	if !t.getLeadership().Check() {
 		tsoCounter.WithLabelValues("err_lease_reset_ts").Inc()
 		return errors.New("Setup timestamp failed, lease expired")
 	}
@@ -253,9 +273,10 @@ func (t *TimestampOracle) ResetTimestamp() {
 		physical: typeutil.ZeroTime,
 	}
 	atomic.StorePointer(&t.ts, unsafe.Pointer(zero))
+	t.setLeadership(nil)
 }
 
-var maxRetryCount = 100
+var maxRetryCount = 10
 
 // GetRespTS is used to get a timestamp.
 func (t *TimestampOracle) GetRespTS(count uint32) (pdpb.Timestamp, error) {
@@ -272,9 +293,14 @@ func (t *TimestampOracle) GetRespTS(count uint32) (pdpb.Timestamp, error) {
 	for i := 0; i < maxRetryCount; i++ {
 		current := (*atomicObject)(atomic.LoadPointer(&t.ts))
 		if current == nil || current.physical == typeutil.ZeroTime {
-			log.Error("we haven't synced timestamp ok, wait and retry", zap.Int("retry-count", i))
-			time.Sleep(200 * time.Millisecond)
-			continue
+			// If it's leader, maybe SyncTimestamp hasn't completed yet
+			if t.getLeadership().Check() {
+				log.Info("sync hasn't completed yet, wait for a while")
+				time.Sleep(200 * time.Millisecond)
+				continue
+			}
+			log.Error("invalid timestamp", zap.Any("timestamp", current), zap.Error(errs.ErrInvalidTimestamp.FastGenByArgs()))
+			return pdpb.Timestamp{}, errors.New("can not get timestamp, may be not leader")
 		}
 
 		resp.Physical = current.physical.UnixNano() / int64(time.Millisecond)
@@ -282,12 +308,13 @@ func (t *TimestampOracle) GetRespTS(count uint32) (pdpb.Timestamp, error) {
 		if resp.Logical >= maxLogical {
 			log.Error("logical part outside of max logical interval, please check ntp time",
 				zap.Reflect("response", resp),
-				zap.Int("retry-count", i))
+				zap.Int("retry-count", i), zap.Error(errs.ErrLogicOverflow.FastGenByArgs()))
 			tsoCounter.WithLabelValues("logical_overflow").Inc()
 			time.Sleep(UpdateTimestampStep)
 			continue
 		}
-		if t.lease == nil || t.lease.IsExpired() {
+		// In case lease expired after the first check.
+		if !t.getLeadership().Check() {
 			return pdpb.Timestamp{}, errors.New("alloc timestamp failed, lease expired")
 		}
 		return resp, nil

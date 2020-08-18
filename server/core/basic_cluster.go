@@ -1,4 +1,4 @@
-// Copyright 2017 PingCAP, Inc.
+// Copyright 2017 TiKV Project Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,8 +19,8 @@ import (
 
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/log"
-	"github.com/pingcap/pd/v4/pkg/slice"
-	"github.com/pingcap/pd/v4/server/schedule/storelimit"
+	"github.com/tikv/pd/pkg/slice"
+	"github.com/tikv/pd/server/schedule/storelimit"
 	"go.uber.org/zap"
 )
 
@@ -128,18 +128,20 @@ func (bc *BasicCluster) GetAdjacentRegions(region *RegionInfo) (*RegionInfo, *Re
 	return bc.Regions.GetAdjacentRegions(region)
 }
 
-// BlockStore stops balancer from selecting the store.
-func (bc *BasicCluster) BlockStore(storeID uint64) error {
+// PauseLeaderTransfer prevents the store from been selected as source or
+// target store of TransferLeader.
+func (bc *BasicCluster) PauseLeaderTransfer(storeID uint64) error {
 	bc.Lock()
 	defer bc.Unlock()
-	return bc.Stores.BlockStore(storeID)
+	return bc.Stores.PauseLeaderTransfer(storeID)
 }
 
-// UnblockStore allows balancer to select the store.
-func (bc *BasicCluster) UnblockStore(storeID uint64) {
+// ResumeLeaderTransfer cleans a store's pause state. The store can be selected
+// as source or target of TransferLeader again.
+func (bc *BasicCluster) ResumeLeaderTransfer(storeID uint64) {
 	bc.Lock()
 	defer bc.Unlock()
-	bc.Stores.UnblockStore(storeID)
+	bc.Stores.ResumeLeaderTransfer(storeID)
 }
 
 // AttachAvailableFunc attaches an available function to a specific store.
@@ -304,10 +306,15 @@ func (bc *BasicCluster) PreCheckPutRegion(region *RegionInfo) (*RegionInfo, erro
 	}
 	r := region.GetRegionEpoch()
 	o := origin.GetRegionEpoch()
+
+	// TiKV reports term after v3.0
+	isTermBehind := region.GetTerm() > 0 && region.GetTerm() < origin.GetTerm()
+
 	// Region meta is stale, return an error.
-	if r.GetVersion() < o.GetVersion() || r.GetConfVer() < o.GetConfVer() {
+	if r.GetVersion() < o.GetVersion() || r.GetConfVer() < o.GetConfVer() || isTermBehind {
 		return origin, ErrRegionIsStale(region.GetMeta(), origin.GetMeta())
 	}
+
 	return origin, nil
 }
 
@@ -391,8 +398,8 @@ type StoreSetInformer interface {
 
 // StoreSetController is used to control stores' status.
 type StoreSetController interface {
-	BlockStore(id uint64) error
-	UnblockStore(id uint64)
+	PauseLeaderTransfer(id uint64) error
+	ResumeLeaderTransfer(id uint64)
 
 	AttachAvailableFunc(id uint64, limitType storelimit.Type, f func() bool)
 }

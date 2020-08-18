@@ -1,4 +1,4 @@
-// Copyright 2020 PingCAP, Inc.
+// Copyright 2020 TiKV Project Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,9 +18,9 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/pingcap/errcode"
-	"github.com/pingcap/pd/v4/pkg/apiutil"
-	"github.com/pingcap/pd/v4/server"
 	"github.com/pkg/errors"
+	"github.com/tikv/pd/pkg/apiutil"
+	"github.com/tikv/pd/server"
 	"github.com/unrolled/render"
 )
 
@@ -42,7 +42,7 @@ func newComponentHandler(svr *server.Server, rd *render.Render) *componentHandle
 // @Tags component
 // @Summary Register component address.
 // @Produce json
-// @Success 200 {string} string
+// @Success 200 {string} string "The component address is registered successfully."
 // @Failure 400 {string} string "The input is invalid."
 // @Failure 500 {string} string "PD server failed to proceed the request."
 // @Router /component [post]
@@ -66,13 +66,13 @@ func (h *componentHandler) Register(w http.ResponseWriter, r *http.Request) {
 		h.rd.JSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	h.rd.JSON(w, http.StatusOK, nil)
+	h.rd.JSON(w, http.StatusOK, "The component address is registered successfully.")
 }
 
 // @Tags component
 // @Summary Unregister component address.
 // @Produce json
-// @Success 200 {string} string
+// @Success 200 {string} string "The component address is unregistered successfully."
 // @Failure 400 {string} string "The input is invalid."
 // @Router /component [delete]
 func (h *componentHandler) UnRegister(w http.ResponseWriter, r *http.Request) {
@@ -84,7 +84,7 @@ func (h *componentHandler) UnRegister(w http.ResponseWriter, r *http.Request) {
 		h.rd.JSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	h.rd.JSON(w, http.StatusOK, nil)
+	h.rd.JSON(w, http.StatusOK, "The component address is unregistered successfully.")
 }
 
 // @Tags component

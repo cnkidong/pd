@@ -1,4 +1,4 @@
-// Copyright 2020 PingCAP, Inc.
+// Copyright 2020 TiKV Project Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,10 +16,11 @@ package placement
 import (
 	"bytes"
 	"encoding/hex"
+	"fmt"
 	"sort"
 	"strings"
 
-	"github.com/pkg/errors"
+	"github.com/tikv/pd/pkg/errs"
 )
 
 type splitPointType int
@@ -41,6 +42,7 @@ type sortedRules struct {
 	rules []*Rule
 }
 
+// insertRule inserts a rule into soretedRules while keeping the order unchanged
 func (sr *sortedRules) insertRule(rule *Rule) {
 	i := sort.Search(len(sr.rules), func(i int) bool {
 		return compareRule(sr.rules[i], rule) > 0
@@ -63,18 +65,22 @@ func (sr *sortedRules) deleteRule(rule *Rule) {
 }
 
 type rangeRules struct {
-	startKey   []byte
-	rules      []*Rule
+	startKey []byte
+	// rules indicates all the rules match the given range
+	rules []*Rule
+	// applyRules indicates the selected rules(filtered by prepareRulesForApply) from the given rules
 	applyRules []*Rule
 }
 
 type ruleList struct {
-	ranges []rangeRules // ranges[i] contains rules apply to (ranges[i].startKey, ranges[i+1].startKey).
+	ranges []rangeRules // ranges[i] contains rules apply to [ranges[i].startKey, ranges[i+1].startKey).
 }
 
+// buildRuleList builds the applied ruleList for the give rules
+// rules indicates the map (rule's GroupID, ID) => rule
 func buildRuleList(rules map[[2]string]*Rule) (ruleList, error) {
 	if len(rules) == 0 {
-		return ruleList{}, errors.New("no rule left")
+		return ruleList{}, errs.ErrBuildRuleList.FastGenByArgs("no rule left")
 	}
 	// collect and sort split points.
 	var points []splitPoint
@@ -114,9 +120,9 @@ func buildRuleList(rules map[[2]string]*Rule) (ruleList, error) {
 				if i != len(points)-1 {
 					endKey = points[i+1].key
 				}
-				return ruleList{}, errors.Errorf("no rule for range {%s, %s}",
+				return ruleList{}, errs.ErrBuildRuleList.FastGenByArgs(fmt.Sprintf("no rule for range {%s, %s}",
 					strings.ToUpper(hex.EncodeToString(p.key)),
-					strings.ToUpper(hex.EncodeToString(endKey)))
+					strings.ToUpper(hex.EncodeToString(endKey))))
 			}
 			if i != len(points)-1 {
 				rr = append(rr[:0:0], rr...) // clone

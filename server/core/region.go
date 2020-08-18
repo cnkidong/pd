@@ -1,4 +1,4 @@
-// Copyright 2016 PingCAP, Inc.
+// Copyright 2016 TiKV Project Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -31,6 +31,7 @@ import (
 // RegionInfo records detail region info.
 // Read-Only once created.
 type RegionInfo struct {
+	term              uint64
 	meta              *metapb.Region
 	learners          []*metapb.Peer
 	voters            []*metapb.Peer
@@ -66,7 +67,7 @@ func classifyVoterAndLearner(region *RegionInfo) {
 	learners := make([]*metapb.Peer, 0, 1)
 	voters := make([]*metapb.Peer, 0, len(region.meta.Peers))
 	for _, p := range region.meta.Peers {
-		if p.IsLearner {
+		if IsLearner(p) {
 			learners = append(learners, p)
 		} else {
 			voters = append(voters, p)
@@ -90,6 +91,7 @@ func RegionFromHeartbeat(heartbeat *pdpb.RegionHeartbeatRequest) *RegionInfo {
 	}
 
 	region := &RegionInfo{
+		term:              heartbeat.GetTerm(),
 		meta:              heartbeat.GetRegion(),
 		leader:            heartbeat.GetLeader(),
 		downPeers:         heartbeat.GetDownPeers(),
@@ -120,6 +122,7 @@ func (r *RegionInfo) Clone(opts ...RegionCreateOption) *RegionInfo {
 	}
 
 	region := &RegionInfo{
+		term:              r.term,
 		meta:              proto.Clone(r.meta).(*metapb.Region),
 		leader:            proto.Clone(r.leader).(*metapb.Peer),
 		downPeers:         downPeers,
@@ -139,6 +142,11 @@ func (r *RegionInfo) Clone(opts ...RegionCreateOption) *RegionInfo {
 	}
 	classifyVoterAndLearner(region)
 	return region
+}
+
+// GetTerm returns the current term of the region
+func (r *RegionInfo) GetTerm() uint64 {
+	return r.term
 }
 
 // GetLearners returns the learners.
@@ -174,7 +182,7 @@ func (r *RegionInfo) GetDownPeer(peerID uint64) *metapb.Peer {
 // GetDownVoter returns the down voter with specified peer id.
 func (r *RegionInfo) GetDownVoter(peerID uint64) *metapb.Peer {
 	for _, down := range r.downPeers {
-		if down.GetPeer().GetId() == peerID && !down.GetPeer().IsLearner {
+		if down.GetPeer().GetId() == peerID && !IsLearner(down.GetPeer()) {
 			return down.GetPeer()
 		}
 	}
@@ -184,7 +192,7 @@ func (r *RegionInfo) GetDownVoter(peerID uint64) *metapb.Peer {
 // GetDownLearner returns the down learner with soecified peer id.
 func (r *RegionInfo) GetDownLearner(peerID uint64) *metapb.Peer {
 	for _, down := range r.downPeers {
-		if down.GetPeer().GetId() == peerID && down.GetPeer().IsLearner {
+		if down.GetPeer().GetId() == peerID && IsLearner(down.GetPeer()) {
 			return down.GetPeer()
 		}
 	}
@@ -204,7 +212,7 @@ func (r *RegionInfo) GetPendingPeer(peerID uint64) *metapb.Peer {
 // GetPendingVoter returns the pending voter with specified peer id.
 func (r *RegionInfo) GetPendingVoter(peerID uint64) *metapb.Peer {
 	for _, peer := range r.pendingPeers {
-		if peer.GetId() == peerID && !peer.IsLearner {
+		if peer.GetId() == peerID && !IsLearner(peer) {
 			return peer
 		}
 	}
@@ -214,7 +222,7 @@ func (r *RegionInfo) GetPendingVoter(peerID uint64) *metapb.Peer {
 // GetPendingLearner returns the pending learner peer with specified peer id.
 func (r *RegionInfo) GetPendingLearner(peerID uint64) *metapb.Peer {
 	for _, peer := range r.pendingPeers {
-		if peer.GetId() == peerID && peer.IsLearner {
+		if peer.GetId() == peerID && IsLearner(peer) {
 			return peer
 		}
 	}

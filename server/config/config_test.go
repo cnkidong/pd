@@ -1,4 +1,4 @@
-// Copyright 2017 PingCAP, Inc.
+// Copyright 2017 TiKV Project Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,11 +24,11 @@ import (
 
 	"github.com/BurntSushi/toml"
 	. "github.com/pingcap/check"
-	"github.com/pingcap/pd/v4/server/core"
-	"github.com/pingcap/pd/v4/server/kv"
+	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/kv"
 
 	// Register schedulers.
-	_ "github.com/pingcap/pd/v4/server/schedulers"
+	_ "github.com/tikv/pd/server/schedulers"
 )
 
 func Test(t *testing.T) {
@@ -62,21 +62,46 @@ func (s *testConfigSuite) TestReloadConfig(c *C) {
 	opt.GetPDServerConfig().UseRegionStorage = true
 	c.Assert(opt.Persist(storage), IsNil)
 
-	// suppose we add a new default enable scheduler "adjacent-region"
-	defaultSchedulers := []string{"balance-region", "balance-leader", "hot-region", "label", "adjacent-region"}
+	// Add a new default enable scheduler "adjacent-region"
+	DefaultSchedulers = append(DefaultSchedulers, SchedulerConfig{Type: "adjacent-region"})
+	defer func() {
+		DefaultSchedulers = DefaultSchedulers[:len(DefaultSchedulers)-1]
+	}()
+
 	newOpt, err := newTestScheduleOption()
 	c.Assert(err, IsNil)
-	newOpt.AddSchedulerCfg("adjacent-region", []string{})
 	c.Assert(newOpt.Reload(storage), IsNil)
 	schedulers := newOpt.GetSchedulers()
 	c.Assert(schedulers, HasLen, 5)
 	c.Assert(newOpt.IsUseRegionStorage(), IsTrue)
 	for i, s := range schedulers {
-		c.Assert(s.Type, Equals, defaultSchedulers[i])
+		c.Assert(s.Type, Equals, DefaultSchedulers[i].Type)
 		c.Assert(s.Disable, IsFalse)
 	}
 	c.Assert(newOpt.GetMaxReplicas(), Equals, 5)
 	c.Assert(newOpt.GetMaxSnapshotCount(), Equals, uint64(10))
+}
+
+func (s *testConfigSuite) TestReloadUpgrade(c *C) {
+	opt, err := newTestScheduleOption()
+	c.Assert(err, IsNil)
+
+	// Simulate an old configuration that only contains 2 fields.
+	type OldConfig struct {
+		Schedule    ScheduleConfig    `toml:"schedule" json:"schedule"`
+		Replication ReplicationConfig `toml:"replication" json:"replication"`
+	}
+	old := &OldConfig{
+		Schedule:    *opt.GetScheduleConfig(),
+		Replication: *opt.GetReplicationConfig(),
+	}
+	storage := core.NewStorage(kv.NewMemoryKV())
+	c.Assert(storage.SaveConfig(old), IsNil)
+
+	newOpt, err := newTestScheduleOption()
+	c.Assert(err, IsNil)
+	c.Assert(newOpt.Reload(storage), IsNil)
+	c.Assert(newOpt.GetPDServerConfig().KeyType, Equals, defaultKeyType) // should be set to default value.
 }
 
 func (s *testConfigSuite) TestValidation(c *C) {
@@ -317,6 +342,27 @@ tidb-cert-path = "/path/client.pem"
 	c.Assert(cfg.Dashboard.TiDBCAPath, Equals, "/path/ca.pem")
 	c.Assert(cfg.Dashboard.TiDBKeyPath, Equals, "/path/client-key.pem")
 	c.Assert(cfg.Dashboard.TiDBCertPath, Equals, "/path/client.pem")
+
+	// Test different editions
+	tests := []struct {
+		Edition         string
+		EnableTelemetry bool
+	}{
+		{"Community", true},
+		{"Enterprise", false},
+	}
+	originalDefaultEnableTelemetry := defaultEnableTelemetry
+	for _, test := range tests {
+		defaultEnableTelemetry = true
+		initByLDFlags(test.Edition)
+		cfg = NewConfig()
+		meta, err = toml.Decode(cfgData, &cfg)
+		c.Assert(err, IsNil)
+		err = cfg.Adjust(&meta)
+		c.Assert(err, IsNil)
+		c.Assert(cfg.Dashboard.EnableTelemetry, Equals, test.EnableTelemetry)
+	}
+	defaultEnableTelemetry = originalDefaultEnableTelemetry
 }
 
 func (s *testConfigSuite) TestReplicationMode(c *C) {

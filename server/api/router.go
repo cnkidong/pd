@@ -1,4 +1,4 @@
-// Copyright 2016 PingCAP, Inc.
+// Copyright 2016 TiKV Project Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@ import (
 	"net/http/pprof"
 
 	"github.com/gorilla/mux"
-	"github.com/pingcap/pd/v4/server"
+	"github.com/tikv/pd/server"
 	"github.com/unrolled/render"
 )
 
@@ -40,7 +40,7 @@ func createIndentRender() *render.Render {
 // @version 1.0
 // @description This is placement driver.
 // @contact.name Placement Driver Support
-// @contact.url https://github.com/pingcap/pd/issues
+// @contact.url https://github.com/tikv/pd/issues
 // @contact.email info@pingcap.com
 // @license.name Apache 2.0
 // @license.url http://www.apache.org/licenses/LICENSE-2.0.html
@@ -91,6 +91,8 @@ func createRouter(ctx context.Context, prefix string, svr *server.Server) *mux.R
 
 	rulesHandler := newRulesHandler(svr, rd)
 	clusterRouter.HandleFunc("/config/rules", rulesHandler.GetAll).Methods("GET")
+	clusterRouter.HandleFunc("/config/rules", rulesHandler.SetAll).Methods("POST")
+	clusterRouter.HandleFunc("/config/rules/batch", rulesHandler.Batch).Methods("POST")
 	clusterRouter.HandleFunc("/config/rules/group/{group}", rulesHandler.GetAllByGroup).Methods("GET")
 	clusterRouter.HandleFunc("/config/rules/region/{region}", rulesHandler.GetAllByRegion).Methods("GET")
 	clusterRouter.HandleFunc("/config/rules/key/{key}", rulesHandler.GetAllByKey).Methods("GET")
@@ -148,6 +150,7 @@ func createRouter(ctx context.Context, prefix string, svr *server.Server) *mux.R
 	clusterRouter.HandleFunc("/regions/check/hist-size", regionsHandler.GetSizeHistogram).Methods("GET")
 	clusterRouter.HandleFunc("/regions/check/hist-keys", regionsHandler.GetKeysHistogram).Methods("GET")
 	clusterRouter.HandleFunc("/regions/sibling/{id}", regionsHandler.GetRegionSiblings).Methods("GET")
+	clusterRouter.HandleFunc("/regions/accelerate-schedule", regionsHandler.AccelerateRegionsScheduleInRange).Methods("POST")
 
 	apiRouter.Handle("/version", newVersionHandler(rd)).Methods("GET")
 	apiRouter.Handle("/status", newStatusHandler(svr, rd)).Methods("GET")

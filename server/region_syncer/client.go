@@ -1,4 +1,4 @@
-// Copyright 2018 PingCAP, Inc.
+// Copyright 2018 TiKV Project Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,11 +17,12 @@ import (
 	"context"
 	"time"
 
+	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
-	"github.com/pingcap/pd/v4/pkg/grpcutil"
-	"github.com/pingcap/pd/v4/server/core"
 	"github.com/pkg/errors"
+	"github.com/tikv/pd/pkg/grpcutil"
+	"github.com/tikv/pd/server/core"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
@@ -186,18 +187,25 @@ func (s *RegionSyncer) StartSyncWithLeader(addr string) {
 				}
 				stats := resp.GetRegionStats()
 				regions := resp.GetRegions()
+				regionLeaders := resp.GetRegionLeaders()
 				hasStats := len(stats) == len(regions)
 				for i, r := range regions {
-					var region *core.RegionInfo
+					var (
+						region       *core.RegionInfo
+						regionLeader *metapb.Peer
+					)
+					if len(regionLeaders) > i && regionLeaders[i].Id != 0 {
+						regionLeader = regionLeaders[i]
+					}
 					if hasStats {
-						region = core.NewRegionInfo(r, nil,
+						region = core.NewRegionInfo(r, regionLeader,
 							core.SetWrittenBytes(stats[i].BytesWritten),
 							core.SetWrittenKeys(stats[i].KeysWritten),
 							core.SetReadBytes(stats[i].BytesRead),
 							core.SetReadKeys(stats[i].KeysRead),
 						)
 					} else {
-						region = core.NewRegionInfo(r, nil)
+						region = core.NewRegionInfo(r, regionLeader)
 					}
 
 					s.server.GetBasicCluster().CheckAndPutRegion(region)

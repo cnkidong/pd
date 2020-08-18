@@ -1,4 +1,4 @@
-// Copyright 2018 PingCAP, Inc.
+// Copyright 2018 TiKV Project Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,14 +17,13 @@ import (
 	"math/rand"
 
 	"github.com/pingcap/log"
-	"github.com/pingcap/pd/v4/server/core"
-	"github.com/pingcap/pd/v4/server/schedule"
-	"github.com/pingcap/pd/v4/server/schedule/checker"
-	"github.com/pingcap/pd/v4/server/schedule/filter"
-	"github.com/pingcap/pd/v4/server/schedule/operator"
-	"github.com/pingcap/pd/v4/server/schedule/opt"
-	"github.com/pingcap/pd/v4/server/schedule/selector"
 	"github.com/pkg/errors"
+	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/schedule"
+	"github.com/tikv/pd/server/schedule/checker"
+	"github.com/tikv/pd/server/schedule/filter"
+	"github.com/tikv/pd/server/schedule/operator"
+	"github.com/tikv/pd/server/schedule/opt"
 	"go.uber.org/zap"
 )
 
@@ -67,21 +66,16 @@ type randomMergeSchedulerConfig struct {
 
 type randomMergeScheduler struct {
 	*BaseScheduler
-	conf     *randomMergeSchedulerConfig
-	selector *selector.RandomSelector
+	conf *randomMergeSchedulerConfig
 }
 
 // newRandomMergeScheduler creates an admin scheduler that randomly picks two adjacent regions
 // then merges them.
 func newRandomMergeScheduler(opController *schedule.OperatorController, conf *randomMergeSchedulerConfig) schedule.Scheduler {
-	filters := []filter.Filter{
-		filter.StoreStateFilter{ActionScope: conf.Name, MoveRegion: true},
-	}
 	base := NewBaseScheduler(opController)
 	return &randomMergeScheduler{
 		BaseScheduler: base,
 		conf:          conf,
-		selector:      selector.NewRandomSelector(filters),
 	}
 }
 
@@ -104,8 +98,9 @@ func (s *randomMergeScheduler) IsScheduleAllowed(cluster opt.Cluster) bool {
 func (s *randomMergeScheduler) Schedule(cluster opt.Cluster) []*operator.Operator {
 	schedulerCounter.WithLabelValues(s.GetName(), "schedule").Inc()
 
-	stores := cluster.GetStores()
-	store := s.selector.SelectSource(cluster, stores)
+	store := filter.NewCandidates(cluster.GetStores()).
+		FilterSource(cluster, filter.StoreStateFilter{ActionScope: s.conf.Name, MoveRegion: true}).
+		RandomPick()
 	if store == nil {
 		schedulerCounter.WithLabelValues(s.GetName(), "no-source-store").Inc()
 		return nil

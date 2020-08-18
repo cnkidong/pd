@@ -1,4 +1,4 @@
-// Copyright 2017 PingCAP, Inc.
+// Copyright 2017 TiKV Project Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,11 +22,12 @@ import (
 
 	"github.com/coreos/go-semver/semver"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/pingcap/pd/v4/pkg/typeutil"
-	"github.com/pingcap/pd/v4/server/core"
-	"github.com/pingcap/pd/v4/server/kv"
-	"github.com/pingcap/pd/v4/server/schedule"
-	"github.com/pingcap/pd/v4/server/schedule/storelimit"
+	"github.com/tikv/pd/pkg/slice"
+	"github.com/tikv/pd/pkg/typeutil"
+	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/kv"
+	"github.com/tikv/pd/server/schedule"
+	"github.com/tikv/pd/server/schedule/storelimit"
 )
 
 // PersistOptions wraps all configurations that need to persist to storage and
@@ -122,6 +123,11 @@ func (o *PersistOptions) GetLocationLabels() []string {
 	return o.GetReplicationConfig().LocationLabels
 }
 
+// GetIsolationLevel returns the isolation label for each region.
+func (o *PersistOptions) GetIsolationLevel() string {
+	return o.GetReplicationConfig().IsolationLevel
+}
+
 // IsPlacementRulesEnabled returns if the placement rules is enabled.
 func (o *PersistOptions) IsPlacementRulesEnabled() bool {
 	return o.GetReplicationConfig().EnablePlacementRules
@@ -206,11 +212,13 @@ func (o *PersistOptions) SetAllStoresLimit(typ storelimit.Type, ratePerMin float
 	v := o.GetScheduleConfig().Clone()
 	switch typ {
 	case storelimit.AddPeer:
+		DefaultStoreLimit.SetDefaultStoreLimit(storelimit.AddPeer, ratePerMin)
 		for storeID := range v.StoreLimit {
 			sc := StoreLimitConfig{AddPeer: ratePerMin, RemovePeer: v.StoreLimit[storeID].RemovePeer}
 			v.StoreLimit[storeID] = sc
 		}
 	case storelimit.RemovePeer:
+		DefaultStoreLimit.SetDefaultStoreLimit(storelimit.RemovePeer, ratePerMin)
 		for storeID := range v.StoreLimit {
 			sc := StoreLimitConfig{AddPeer: v.StoreLimit[storeID].AddPeer, RemovePeer: ratePerMin}
 			v.StoreLimit[storeID] = sc
@@ -270,7 +278,14 @@ func (o *PersistOptions) GetStoreLimit(storeID uint64) StoreLimitConfig {
 	if limit, ok := o.GetScheduleConfig().StoreLimit[storeID]; ok {
 		return limit
 	}
-	return StoreLimitConfig{0, 0}
+	cfg := o.GetScheduleConfig().Clone()
+	sc := StoreLimitConfig{
+		AddPeer:    DefaultStoreLimit.GetDefaultStoreLimit(storelimit.AddPeer),
+		RemovePeer: DefaultStoreLimit.GetDefaultStoreLimit(storelimit.RemovePeer),
+	}
+	cfg.StoreLimit[storeID] = sc
+	o.SetScheduleConfig(cfg)
+	return o.GetScheduleConfig().StoreLimit[storeID]
 }
 
 // GetStoreLimitByType returns the limit of a store with a given type.
@@ -472,19 +487,15 @@ func (o *PersistOptions) Persist(storage *core.Storage) error {
 
 // Reload reloads the configuration from the storage.
 func (o *PersistOptions) Reload(storage *core.Storage) error {
-	cfg := &Config{
-		Schedule:        *o.GetScheduleConfig().Clone(),
-		Replication:     *o.GetReplicationConfig().clone(),
-		PDServerCfg:     *o.GetPDServerConfig().Clone(),
-		ReplicationMode: *o.GetReplicationModeConfig().Clone(),
-		LabelProperty:   o.GetLabelPropertyConfig().Clone(),
-		ClusterVersion:  *o.GetClusterVersion(),
-	}
+	cfg := &Config{}
+	// pass nil to initialize cfg to default values (all items undefined)
+	cfg.Adjust(nil)
+
 	isExist, err := storage.LoadConfig(cfg)
 	if err != nil {
 		return err
 	}
-	o.adjustScheduleCfg(cfg)
+	o.adjustScheduleCfg(&cfg.Schedule)
 	if isExist {
 		o.schedule.Store(&cfg.Schedule)
 		o.replication.Store(&cfg.Replication)
@@ -496,33 +507,16 @@ func (o *PersistOptions) Reload(storage *core.Storage) error {
 	return nil
 }
 
-func (o *PersistOptions) adjustScheduleCfg(persistentCfg *Config) {
-	scheduleCfg := o.GetScheduleConfig().Clone()
-	for i, s := range scheduleCfg.Schedulers {
-		for _, ps := range persistentCfg.Schedule.Schedulers {
-			if s.Type == ps.Type && reflect.DeepEqual(s.Args, ps.Args) {
-				scheduleCfg.Schedulers[i].Disable = ps.Disable
-				break
-			}
+func (o *PersistOptions) adjustScheduleCfg(scheduleCfg *ScheduleConfig) {
+	// In case we add new default schedulers.
+	for _, ps := range DefaultSchedulers {
+		if slice.NoneOf(scheduleCfg.Schedulers, func(i int) bool {
+			return scheduleCfg.Schedulers[i].Type == ps.Type
+		}) {
+			scheduleCfg.Schedulers = append(scheduleCfg.Schedulers, ps)
 		}
 	}
-	restoredSchedulers := make([]SchedulerConfig, 0, len(persistentCfg.Schedule.Schedulers))
-	for _, ps := range persistentCfg.Schedule.Schedulers {
-		needRestore := true
-		for _, s := range scheduleCfg.Schedulers {
-			if s.Type == ps.Type && reflect.DeepEqual(s.Args, ps.Args) {
-				needRestore = false
-				break
-			}
-		}
-		if needRestore {
-			restoredSchedulers = append(restoredSchedulers, ps)
-		}
-	}
-	scheduleCfg.Schedulers = append(scheduleCfg.Schedulers, restoredSchedulers...)
-	persistentCfg.Schedule.Schedulers = scheduleCfg.Schedulers
-	persistentCfg.Schedule.MigrateDeprecatedFlags()
-	o.SetScheduleConfig(scheduleCfg)
+	scheduleCfg.MigrateDeprecatedFlags()
 }
 
 // CheckLabelProperty checks the label property.

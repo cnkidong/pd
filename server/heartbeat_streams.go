@@ -1,4 +1,4 @@
-// Copyright 2017 PingCAP, Inc.
+// Copyright 2017 TiKV Project Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,10 +22,10 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
-	"github.com/pingcap/pd/v4/pkg/logutil"
-	"github.com/pingcap/pd/v4/server/cluster"
-	"github.com/pingcap/pd/v4/server/core"
-	"github.com/pingcap/pd/v4/server/schedule/opt"
+	"github.com/tikv/pd/pkg/logutil"
+	"github.com/tikv/pd/server/cluster"
+	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/schedule/opt"
 	"go.uber.org/zap"
 )
 
@@ -118,7 +118,7 @@ func (s *heartbeatStreams) run() {
 				storeAddress := store.GetAddress()
 				storeLabel := strconv.FormatUint(storeID, 10)
 				if err := stream.Send(keepAlive); err != nil {
-					log.Error("send keepalive message fail",
+					log.Warn("send keepalive message fail, store maybe disconnected",
 						zap.Uint64("target-store-id", storeID),
 						zap.Error(err))
 					delete(s.streams, storeID)

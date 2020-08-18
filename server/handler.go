@@ -1,4 +1,4 @@
-// Copyright 2016 PingCAP, Inc.
+// Copyright 2016 TiKV Project Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -27,16 +27,16 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
-	"github.com/pingcap/pd/v4/server/cluster"
-	"github.com/pingcap/pd/v4/server/config"
-	"github.com/pingcap/pd/v4/server/core"
-	"github.com/pingcap/pd/v4/server/schedule"
-	"github.com/pingcap/pd/v4/server/schedule/operator"
-	"github.com/pingcap/pd/v4/server/schedule/opt"
-	"github.com/pingcap/pd/v4/server/schedule/storelimit"
-	"github.com/pingcap/pd/v4/server/schedulers"
-	"github.com/pingcap/pd/v4/server/statistics"
 	"github.com/pkg/errors"
+	"github.com/tikv/pd/server/cluster"
+	"github.com/tikv/pd/server/config"
+	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/schedule"
+	"github.com/tikv/pd/server/schedule/operator"
+	"github.com/tikv/pd/server/schedule/opt"
+	"github.com/tikv/pd/server/schedule/storelimit"
+	"github.com/tikv/pd/server/schedulers"
+	"github.com/tikv/pd/server/statistics"
 	"go.uber.org/zap"
 )
 
@@ -102,15 +102,11 @@ func (h *Handler) GetOperatorController() (*schedule.OperatorController, error) 
 
 // IsSchedulerPaused returns whether scheduler is paused.
 func (h *Handler) IsSchedulerPaused(name string) (bool, error) {
-	c, err := h.GetRaftCluster()
+	rc, err := h.GetRaftCluster()
 	if err != nil {
-		return true, err
+		return false, err
 	}
-	sc, ok := c.GetSchedulers()[name]
-	if !ok {
-		return true, errors.Errorf("scheduler %v not found", name)
-	}
-	return sc.IsPaused(), nil
+	return rc.IsSchedulerPaused(name)
 }
 
 // GetScheduleConfig returns ScheduleConfig.
@@ -124,11 +120,7 @@ func (h *Handler) GetSchedulers() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	names := make([]string, 0, len(c.GetSchedulers()))
-	for name := range c.GetSchedulers() {
-		names = append(names, name)
-	}
-	return names, nil
+	return c.GetSchedulers(), nil
 }
 
 // GetStores returns all stores in the cluster.
@@ -547,7 +539,7 @@ func (h *Handler) AddTransferPeerOperator(regionID uint64, fromStoreID, toStoreI
 		return errcode.Op("operator.add").AddTo(core.StoreTombstonedErr{StoreID: toStoreID})
 	}
 
-	newPeer := &metapb.Peer{StoreId: toStoreID, IsLearner: oldPeer.GetIsLearner()}
+	newPeer := &metapb.Peer{StoreId: toStoreID, Role: oldPeer.GetRole()}
 	op, err := operator.CreateMovePeerOperator("admin-move-peer", c, region, operator.OpAdmin, fromStoreID, newPeer)
 	if err != nil {
 		log.Debug("fail to create move peer operator", zap.Error(err))
@@ -613,8 +605,8 @@ func (h *Handler) AddAddLearnerOperator(regionID uint64, toStoreID uint64) error
 	}
 
 	newPeer := &metapb.Peer{
-		StoreId:   toStoreID,
-		IsLearner: true,
+		StoreId: toStoreID,
+		Role:    metapb.PeerRole_Learner,
 	}
 
 	op, err := operator.CreateAddPeerOperator("admin-add-learner", c, region, newPeer, operator.OpAdmin)
@@ -805,7 +797,7 @@ func (h *Handler) GetSchedulerConfigHandler() http.Handler {
 		return nil
 	}
 	mux := http.NewServeMux()
-	for name, handler := range c.GetSchedulers() {
+	for name, handler := range c.GetSchedulerHandlers() {
 		prefix := path.Join(pdRootPath, SchedulerConfigHandlerPath, name)
 		urlPath := prefix + "/"
 		mux.Handle(urlPath, http.StripPrefix(prefix, handler))

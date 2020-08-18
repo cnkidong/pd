@@ -1,4 +1,4 @@
-// Copyright 2017 PingCAP, Inc.
+// Copyright 2017 TiKV Project Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,9 +25,10 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
-	"github.com/pingcap/pd/v4/server/cluster"
-	"github.com/pingcap/pd/v4/server/core"
 	"github.com/pkg/errors"
+	"github.com/tikv/pd/server/cluster"
+	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/versioninfo"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -224,7 +225,7 @@ func (s *Server) PutStore(ctx context.Context, request *pdpb.PutStoreRequest) (*
 	}
 
 	// NOTE: can be removed when placement rules feature is enabled by default.
-	if !s.GetConfig().Replication.EnablePlacementRules && isTiFlashStore(store) {
+	if !s.GetConfig().Replication.EnablePlacementRules && core.IsTiFlashStore(store) {
 		return nil, status.Errorf(codes.FailedPrecondition, "placement rules is disabled")
 	}
 
@@ -235,11 +236,7 @@ func (s *Server) PutStore(ctx context.Context, request *pdpb.PutStoreRequest) (*
 	log.Info("put store ok", zap.Stringer("store", store))
 	rc.OnStoreVersionChange()
 	CheckPDVersion(s.persistOptions)
-	if isTiFlashStore(store) {
-		rc.AddStoreLimit(store.GetId(), true /* isTiFlashStore*/)
-	} else {
-		rc.AddStoreLimit(store.GetId(), false /* isTiFlashStore*/)
-	}
+	rc.AddStoreLimit(store)
 
 	return &pdpb.PutStoreResponse{
 		Header:            s.header(),
@@ -307,6 +304,7 @@ func (s *Server) StoreHeartbeat(ctx context.Context, request *pdpb.StoreHeartbea
 	return &pdpb.StoreHeartbeatResponse{
 		Header:            s.header(),
 		ReplicationStatus: rc.GetReplicationMode().GetReplicationStatus(),
+		ClusterVersion:    rc.GetClusterVersion(),
 	}, nil
 }
 
@@ -502,8 +500,15 @@ func (s *Server) ScanRegions(ctx context.Context, request *pdpb.ScanRegionsReque
 		if leader == nil {
 			leader = &metapb.Peer{}
 		}
-		resp.Regions = append(resp.Regions, r.GetMeta())
+		// Set RegionMetas and Leaders to make it compatible with old client.
+		resp.RegionMetas = append(resp.RegionMetas, r.GetMeta())
 		resp.Leaders = append(resp.Leaders, leader)
+		resp.Regions = append(resp.Regions, &pdpb.Region{
+			Region:       r.GetMeta(),
+			Leader:       leader,
+			DownPeers:    r.GetDownPeers(),
+			PendingPeers: r.GetPendingPeers(),
+		})
 	}
 	return resp, nil
 }
@@ -547,7 +552,7 @@ func (s *Server) AskBatchSplit(ctx context.Context, request *pdpb.AskBatchSplitR
 		return &pdpb.AskBatchSplitResponse{Header: s.notBootstrappedHeader()}, nil
 	}
 
-	if !rc.IsFeatureSupported(cluster.BatchSplit) {
+	if !rc.IsFeatureSupported(versioninfo.BatchSplit) {
 		return &pdpb.AskBatchSplitResponse{Header: s.incompatibleVersion("batch_split")}, nil
 	}
 	if request.GetRegion() == nil {
@@ -775,7 +780,7 @@ func (s *Server) UpdateServiceGCSafePoint(ctx context.Context, request *pdpb.Upd
 		return nil, err
 	}
 
-	if request.TTL > 0 && request.SafePoint > min.SafePoint {
+	if request.TTL > 0 && request.SafePoint >= min.SafePoint {
 		ssp := &core.ServiceSafePoint{
 			ServiceID: string(request.ServiceId),
 			ExpiredAt: time.Now().Unix() + request.TTL,

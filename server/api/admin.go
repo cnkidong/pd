@@ -1,4 +1,4 @@
-// Copyright 2018 PingCAP, Inc.
+// Copyright 2018 TiKV Project Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,8 +19,8 @@ import (
 	"strconv"
 
 	"github.com/gorilla/mux"
-	"github.com/pingcap/pd/v4/pkg/apiutil"
-	"github.com/pingcap/pd/v4/server"
+	"github.com/tikv/pd/pkg/apiutil"
+	"github.com/tikv/pd/server"
 	"github.com/unrolled/render"
 )
 
@@ -53,7 +53,7 @@ func (h *adminHandler) HandleDropCacheRegion(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	rc.DropCacheRegion(regionID)
-	h.rd.JSON(w, http.StatusOK, nil)
+	h.rd.JSON(w, http.StatusOK, "The region is removed from server cache.")
 }
 
 // FIXME: details of input json body params
@@ -62,7 +62,7 @@ func (h *adminHandler) HandleDropCacheRegion(w http.ResponseWriter, r *http.Requ
 // @Accept json
 // @Param body body object true "json params"
 // @Produce json
-// @Success 200 {string} string "Reset ts success."
+// @Success 200 {string} string "Reset ts successfully."
 // @Failure 400 {string} string "The input is invalid."
 // @Failure 403 {string} string "Reset ts is forbidden."
 // @Failure 500 {string} string "PD server failed to proceed the request."
@@ -91,7 +91,7 @@ func (h *adminHandler) ResetTS(w http.ResponseWriter, r *http.Request) {
 			h.rd.JSON(w, http.StatusForbidden, err.Error())
 		}
 	}
-	h.rd.JSON(w, http.StatusOK, "success")
+	h.rd.JSON(w, http.StatusOK, "Reset ts successfully.")
 }
 
 // Intentionally no swagger mark as it is supposed to be only used in

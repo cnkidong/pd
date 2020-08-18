@@ -1,4 +1,4 @@
-// Copyright 2016 PingCAP, Inc.
+// Copyright 2016 TiKV Project Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,23 +28,25 @@ import (
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/kvproto/pkg/replication_modepb"
 	"github.com/pingcap/log"
-	"github.com/pingcap/pd/v4/pkg/cache"
-	"github.com/pingcap/pd/v4/pkg/component"
-	"github.com/pingcap/pd/v4/pkg/etcdutil"
-	"github.com/pingcap/pd/v4/pkg/logutil"
-	"github.com/pingcap/pd/v4/pkg/typeutil"
-	"github.com/pingcap/pd/v4/server/config"
-	"github.com/pingcap/pd/v4/server/core"
-	"github.com/pingcap/pd/v4/server/id"
-	syncer "github.com/pingcap/pd/v4/server/region_syncer"
-	"github.com/pingcap/pd/v4/server/replication"
-	"github.com/pingcap/pd/v4/server/schedule"
-	"github.com/pingcap/pd/v4/server/schedule/checker"
-	"github.com/pingcap/pd/v4/server/schedule/opt"
-	"github.com/pingcap/pd/v4/server/schedule/placement"
-	"github.com/pingcap/pd/v4/server/schedule/storelimit"
-	"github.com/pingcap/pd/v4/server/statistics"
 	"github.com/pkg/errors"
+	"github.com/tikv/pd/pkg/cache"
+	"github.com/tikv/pd/pkg/component"
+	"github.com/tikv/pd/pkg/etcdutil"
+	"github.com/tikv/pd/pkg/keyutil"
+	"github.com/tikv/pd/pkg/logutil"
+	"github.com/tikv/pd/pkg/typeutil"
+	"github.com/tikv/pd/server/config"
+	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/id"
+	syncer "github.com/tikv/pd/server/region_syncer"
+	"github.com/tikv/pd/server/replication"
+	"github.com/tikv/pd/server/schedule"
+	"github.com/tikv/pd/server/schedule/checker"
+	"github.com/tikv/pd/server/schedule/opt"
+	"github.com/tikv/pd/server/schedule/placement"
+	"github.com/tikv/pd/server/schedule/storelimit"
+	"github.com/tikv/pd/server/statistics"
+	"github.com/tikv/pd/server/versioninfo"
 	"go.etcd.io/etcd/clientv3"
 	"go.uber.org/zap"
 )
@@ -100,8 +102,9 @@ type RaftCluster struct {
 	storesStats     *statistics.StoresStats
 	hotSpotCache    *statistics.HotCache
 
-	coordinator    *coordinator
-	suspectRegions *cache.TTLUint64 // suspectRegions are regions that may need fix
+	coordinator      *coordinator
+	suspectRegions   *cache.TTLUint64 // suspectRegions are regions that may need fix
+	suspectKeyRanges *cache.TTLString // suspect key-range regions that may need fix
 
 	wg           sync.WaitGroup
 	quit         chan struct{}
@@ -202,6 +205,7 @@ func (c *RaftCluster) InitCluster(id id.Allocator, opt *config.PersistOptions, s
 	c.changedRegions = make(chan *core.RegionInfo, defaultChangedRegionsLimit)
 	c.hotSpotCache = statistics.NewHotCache()
 	c.suspectRegions = cache.NewIDTTL(c.ctx, time.Minute, 3*time.Minute)
+	c.suspectKeyRanges = cache.NewStringTTL(c.ctx, time.Minute, 3*time.Minute)
 }
 
 // Start starts a cluster.
@@ -426,7 +430,7 @@ func (c *RaftCluster) AddSuspectRegions(ids ...uint64) {
 	c.Lock()
 	defer c.Unlock()
 	for _, id := range ids {
-		c.suspectRegions.Put(id)
+		c.suspectRegions.Put(id, nil)
 	}
 }
 
@@ -434,7 +438,7 @@ func (c *RaftCluster) AddSuspectRegions(ids ...uint64) {
 func (c *RaftCluster) GetSuspectRegions() []uint64 {
 	c.RLock()
 	defer c.RUnlock()
-	return c.suspectRegions.GetAll()
+	return c.suspectRegions.GetAllID()
 }
 
 // RemoveSuspectRegion removes region from suspect list.
@@ -442,6 +446,39 @@ func (c *RaftCluster) RemoveSuspectRegion(id uint64) {
 	c.Lock()
 	defer c.Unlock()
 	c.suspectRegions.Remove(id)
+}
+
+// AddSuspectKeyRange adds the key range with the its ruleID as the key
+// The instance of each keyRange is like following format:
+// [2][]byte: start key/end key
+func (c *RaftCluster) AddSuspectKeyRange(start, end []byte) {
+	c.Lock()
+	defer c.Unlock()
+	c.suspectKeyRanges.Put(keyutil.BuildKeyRangeKey(start, end), [2][]byte{start, end})
+}
+
+// PopOneSuspectKeyRange gets one suspect keyRange group.
+// it would return value and true if pop success, or return empty [][2][]byte and false
+// if suspectKeyRanges couldn't pop keyRange group.
+func (c *RaftCluster) PopOneSuspectKeyRange() ([2][]byte, bool) {
+	c.Lock()
+	defer c.Unlock()
+	_, value, success := c.suspectKeyRanges.Pop()
+	if !success {
+		return [2][]byte{}, false
+	}
+	v, ok := value.([2][]byte)
+	if !ok {
+		return [2][]byte{}, false
+	}
+	return v, true
+}
+
+// ClearSuspectKeyRanges clears the suspect keyRanges, only for unit test
+func (c *RaftCluster) ClearSuspectKeyRanges() {
+	c.Lock()
+	defer c.Unlock()
+	c.suspectKeyRanges.Clear()
 }
 
 // HandleStoreHeartbeat updates the store status.
@@ -462,7 +499,7 @@ func (c *RaftCluster) HandleStoreHeartbeat(stats *pdpb.StoreStats) error {
 			zap.Uint64("available", newStore.GetAvailable()))
 	}
 	if newStore.NeedPersist() && c.storage != nil {
-		if err := c.storage.SaveStore(store.GetMeta()); err != nil {
+		if err := c.storage.SaveStore(newStore.GetMeta()); err != nil {
 			log.Error("failed to persist store", zap.Uint64("store-id", newStore.GetID()))
 		} else {
 			newStore = newStore.Clone(core.SetLastPersistTime(time.Now()))
@@ -496,7 +533,7 @@ func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 	// Save to storage if meta is updated.
 	// Save to cache if meta or leader is updated, or contains any down/pending peer.
 	// Mark isNew if the region in cache does not have leader.
-	var saveKV, saveCache, isNew, statsChange bool
+	var saveKV, saveCache, isNew, needSync bool
 	if origin == nil {
 		log.Debug("insert new region",
 			zap.Uint64("region-id", region.GetID()),
@@ -534,7 +571,7 @@ func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 					zap.Uint64("to", region.GetLeader().GetStoreId()),
 				)
 			}
-			saveCache = true
+			saveCache, needSync = true, true
 		}
 		if len(region.GetDownPeers()) > 0 || len(region.GetPendingPeers()) > 0 {
 			saveCache = true
@@ -555,7 +592,7 @@ func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 			region.GetBytesRead() != origin.GetBytesRead() ||
 			region.GetKeysWritten() != origin.GetKeysWritten() ||
 			region.GetKeysRead() != origin.GetKeysRead() {
-			saveCache, statsChange = true, true
+			saveCache, needSync = true, true
 		}
 
 		if region.GetReplicationStatus().GetState() != replication_modepb.RegionReplicationState_UNKNOWN &&
@@ -646,7 +683,7 @@ func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 		}
 		regionEventCounter.WithLabelValues("update_kv").Inc()
 	}
-	if saveKV || statsChange {
+	if saveKV || needSync {
 		select {
 		case c.changedRegions <- region:
 		default:
@@ -865,12 +902,12 @@ func (c *RaftCluster) PutStore(store *metapb.Store, force bool) error {
 		return errors.Errorf("invalid put store %v", store)
 	}
 
-	v, err := ParseVersion(store.GetVersion())
+	v, err := versioninfo.ParseVersion(store.GetVersion())
 	if err != nil {
 		return errors.Errorf("invalid put store %v, error: %s", store, err)
 	}
 	clusterVersion := *c.opt.GetClusterVersion()
-	if !IsCompatible(clusterVersion, *v) {
+	if !versioninfo.IsCompatible(clusterVersion, *v) {
 		return errors.Errorf("version should compatible with version  %s, got %s", clusterVersion, v)
 	}
 
@@ -902,6 +939,7 @@ func (c *RaftCluster) PutStore(store *metapb.Store, force bool) error {
 			core.SetStoreVersion(store.GitHash, store.Version),
 			core.SetStoreLabels(labels),
 			core.SetStoreStartTime(store.StartTimestamp),
+			core.SetStoreDeployPath(store.DeployPath),
 		)
 	}
 	if err = c.checkStoreLabels(s); err != nil {
@@ -1008,14 +1046,16 @@ func (c *RaftCluster) BuryStore(storeID uint64, force bool) error {
 	return err
 }
 
-// BlockStore stops balancer from selecting the store.
-func (c *RaftCluster) BlockStore(storeID uint64) error {
-	return c.core.BlockStore(storeID)
+// PauseLeaderTransfer prevents the store from been selected as source or
+// target store of TransferLeader.
+func (c *RaftCluster) PauseLeaderTransfer(storeID uint64) error {
+	return c.core.PauseLeaderTransfer(storeID)
 }
 
-// UnblockStore allows balancer to select the store.
-func (c *RaftCluster) UnblockStore(storeID uint64) {
-	c.core.UnblockStore(storeID)
+// ResumeLeaderTransfer cleans a store's pause state. The store can be selected
+// as source or target of TransferLeader again.
+func (c *RaftCluster) ResumeLeaderTransfer(storeID uint64) {
+	c.core.ResumeLeaderTransfer(storeID)
 }
 
 // AttachAvailableFunc attaches an available function to a specific store.
@@ -1250,30 +1290,26 @@ func (c *RaftCluster) AllocID() (uint64, error) {
 func (c *RaftCluster) OnStoreVersionChange() {
 	c.RLock()
 	defer c.RUnlock()
-	var (
-		minVersion     *semver.Version
-		clusterVersion *semver.Version
-	)
-
+	var minVersion *semver.Version
 	stores := c.GetStores()
 	for _, s := range stores {
 		if s.IsTombstone() {
 			continue
 		}
-		v := MustParseVersion(s.GetVersion())
+		v := versioninfo.MustParseVersion(s.GetVersion())
 
 		if minVersion == nil || v.LessThan(*minVersion) {
 			minVersion = v
 		}
 	}
-	clusterVersion = c.opt.GetClusterVersion()
+	clusterVersion := c.opt.GetClusterVersion()
 	// If the cluster version of PD is less than the minimum version of all stores,
 	// it will update the cluster version.
 	failpoint.Inject("versionChangeConcurrency", func() {
 		time.Sleep(500 * time.Millisecond)
 	})
 
-	if (*clusterVersion).LessThan(*minVersion) {
+	if minVersion != nil && clusterVersion.LessThan(*minVersion) {
 		if !c.opt.CASClusterVersion(clusterVersion, minVersion) {
 			log.Error("cluster version changed by API at the same time")
 		}
@@ -1292,12 +1328,18 @@ func (c *RaftCluster) changedRegionNotifier() <-chan *core.RegionInfo {
 }
 
 // IsFeatureSupported checks if the feature is supported by current cluster.
-func (c *RaftCluster) IsFeatureSupported(f Feature) bool {
+func (c *RaftCluster) IsFeatureSupported(f versioninfo.Feature) bool {
 	c.RLock()
 	defer c.RUnlock()
 	clusterVersion := *c.opt.GetClusterVersion()
-	minSupportVersion := *MinSupportedVersion(f)
-	return !clusterVersion.LessThan(minSupportVersion)
+	minSupportVersion := *versioninfo.MinSupportedVersion(f)
+	// For features before version 5.0 (such as BatchSplit), strict version checks are performed according to the
+	// original logic. But according to Semantic Versioning, specify a version MAJOR.MINOR.PATCH, PATCH is used when you
+	// make backwards compatible bug fixes. In version 5.0 and later, we need to strictly comply.
+	if versioninfo.IsCompatible(minSupportVersion, *versioninfo.MinSupportedVersion(versioninfo.Version4_0)) {
+		return !clusterVersion.LessThan(minSupportVersion)
+	}
+	return versioninfo.IsCompatible(minSupportVersion, clusterVersion)
 }
 
 // GetConfig gets config from cluster.
@@ -1434,6 +1476,11 @@ func (c *RaftCluster) GetMaxReplicas() int {
 // GetLocationLabels returns the location labels for each region
 func (c *RaftCluster) GetLocationLabels() []string {
 	return c.opt.GetLocationLabels()
+}
+
+// GetIsolationLevel returns the isolation label for each region.
+func (c *RaftCluster) GetIsolationLevel() string {
+	return c.opt.GetIsolationLevel()
 }
 
 // GetStrictlyMatchLabel returns if the strictly label check is enabled.
@@ -1641,10 +1688,17 @@ func (c *RaftCluster) GetHotReadRegions() *statistics.StoreHotPeersInfos {
 }
 
 // GetSchedulers gets all schedulers.
-func (c *RaftCluster) GetSchedulers() map[string]*scheduleController {
+func (c *RaftCluster) GetSchedulers() []string {
 	c.RLock()
 	defer c.RUnlock()
 	return c.coordinator.getSchedulers()
+}
+
+// GetSchedulerHandlers gets all scheduler handlers.
+func (c *RaftCluster) GetSchedulerHandlers() map[string]http.Handler {
+	c.RLock()
+	defer c.RUnlock()
+	return c.coordinator.getSchedulerHandlers()
 }
 
 // AddScheduler adds a scheduler.
@@ -1668,6 +1722,13 @@ func (c *RaftCluster) PauseOrResumeScheduler(name string, t int64) error {
 	return c.coordinator.pauseOrResumeScheduler(name, t)
 }
 
+// IsSchedulerPaused checks if a scheduler is paused.
+func (c *RaftCluster) IsSchedulerPaused(name string) (bool, error) {
+	c.RLock()
+	defer c.RUnlock()
+	return c.coordinator.isSchedulerPaused(name)
+}
+
 // GetStoreLimiter returns the dynamic adjusting limiter
 func (c *RaftCluster) GetStoreLimiter() *StoreLimiter {
 	return c.limiter
@@ -1684,18 +1745,19 @@ func (c *RaftCluster) GetAllStoresLimit() map[uint64]config.StoreLimitConfig {
 }
 
 // AddStoreLimit add a store limit for a given store ID.
-func (c *RaftCluster) AddStoreLimit(storeID uint64, isTiFlashStore bool) {
+func (c *RaftCluster) AddStoreLimit(store *metapb.Store) {
 	cfg := c.opt.GetScheduleConfig().Clone()
 	sc := config.StoreLimitConfig{
 		AddPeer:    config.DefaultStoreLimit.GetDefaultStoreLimit(storelimit.AddPeer),
 		RemovePeer: config.DefaultStoreLimit.GetDefaultStoreLimit(storelimit.RemovePeer),
 	}
-	if isTiFlashStore {
+	if core.IsTiFlashStore(store) {
 		sc = config.StoreLimitConfig{
 			AddPeer:    config.DefaultTiFlashStoreLimit.GetDefaultStoreLimit(storelimit.AddPeer),
 			RemovePeer: config.DefaultTiFlashStoreLimit.GetDefaultStoreLimit(storelimit.RemovePeer),
 		}
 	}
+	storeID := store.GetId()
 	cfg.StoreLimit[storeID] = sc
 	c.opt.SetScheduleConfig(cfg)
 }
@@ -1718,6 +1780,11 @@ func (c *RaftCluster) SetStoreLimit(storeID uint64, typ storelimit.Type, ratePer
 // SetAllStoresLimit sets all store limit for a given type and rate.
 func (c *RaftCluster) SetAllStoresLimit(typ storelimit.Type, ratePerMin float64) {
 	c.opt.SetAllStoresLimit(typ, ratePerMin)
+}
+
+// GetClusterVersion returns the current cluster version.
+func (c *RaftCluster) GetClusterVersion() string {
+	return c.opt.GetClusterVersion().String()
 }
 
 var healthURL = "/pd/api/v1/ping"

@@ -1,4 +1,4 @@
-// Copyright 2018 PingCAP, Inc.
+// Copyright 2018 TiKV Project Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,12 +20,12 @@ import (
 
 	. "github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/pingcap/pd/v4/pkg/mock/mockid"
-	"github.com/pingcap/pd/v4/pkg/testutil"
-	"github.com/pingcap/pd/v4/server"
-	"github.com/pingcap/pd/v4/server/config"
-	"github.com/pingcap/pd/v4/server/core"
-	"github.com/pingcap/pd/v4/tests"
+	"github.com/tikv/pd/pkg/mock/mockid"
+	"github.com/tikv/pd/pkg/testutil"
+	"github.com/tikv/pd/server"
+	"github.com/tikv/pd/server/config"
+	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/tests"
 	"go.uber.org/goleak"
 )
 
@@ -86,7 +86,10 @@ func (s *serverTestSuite) TestRegionSyncer(c *C) {
 			},
 			StartKey: []byte{byte(i)},
 			EndKey:   []byte{byte(i + 1)},
-			Peers:    []*metapb.Peer{{Id: allocator.alloc(), StoreId: uint64(0)}},
+			Peers: []*metapb.Peer{
+				{Id: allocator.alloc(), StoreId: uint64(0)},
+				{Id: allocator.alloc(), StoreId: uint64(0)},
+			},
 		}
 		regions = append(regions, core.NewRegionInfo(r, r.Peers[0]))
 	}
@@ -129,6 +132,13 @@ func (s *serverTestSuite) TestRegionSyncer(c *C) {
 		c.Assert(err, IsNil)
 	}
 
+	// change the leader of region
+	for i := 0; i < len(regions); i++ {
+		regions[i] = regions[i].Clone(core.WithLeader(regions[i].GetPeers()[1]))
+		err = rc.HandleRegionHeartbeat(regions[i])
+		c.Assert(err, IsNil)
+	}
+
 	// ensure flush to region storage, we use a duration larger than the
 	// region storage flush rate limit (3s).
 	time.Sleep(4 * time.Second)
@@ -142,6 +152,7 @@ func (s *serverTestSuite) TestRegionSyncer(c *C) {
 		r := followerServer.GetServer().GetBasicCluster().GetRegion(region.GetID())
 		c.Assert(r.GetMeta(), DeepEquals, region.GetMeta())
 		c.Assert(r.GetStat(), DeepEquals, region.GetStat())
+		c.Assert(r.GetLeader(), DeepEquals, region.GetLeader())
 	}
 
 	err = leaderServer.Stop()
@@ -155,6 +166,7 @@ func (s *serverTestSuite) TestRegionSyncer(c *C) {
 		r := leaderServer.GetRegionInfoByID(region.GetID())
 		c.Assert(r.GetMeta(), DeepEquals, region.GetMeta())
 		c.Assert(r.GetStat(), DeepEquals, region.GetStat())
+		c.Assert(r.GetLeader(), DeepEquals, region.GetLeader())
 	}
 }
 

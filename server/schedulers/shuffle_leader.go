@@ -1,4 +1,4 @@
-// Copyright 2017 PingCAP, Inc.
+// Copyright 2017 TiKV Project Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,13 +15,12 @@ package schedulers
 
 import (
 	"github.com/pingcap/log"
-	"github.com/pingcap/pd/v4/server/core"
-	"github.com/pingcap/pd/v4/server/schedule"
-	"github.com/pingcap/pd/v4/server/schedule/filter"
-	"github.com/pingcap/pd/v4/server/schedule/operator"
-	"github.com/pingcap/pd/v4/server/schedule/opt"
-	"github.com/pingcap/pd/v4/server/schedule/selector"
 	"github.com/pkg/errors"
+	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/schedule"
+	"github.com/tikv/pd/server/schedule/filter"
+	"github.com/tikv/pd/server/schedule/operator"
+	"github.com/tikv/pd/server/schedule/opt"
 	"go.uber.org/zap"
 )
 
@@ -65,8 +64,8 @@ type shuffleLeaderSchedulerConfig struct {
 
 type shuffleLeaderScheduler struct {
 	*BaseScheduler
-	conf     *shuffleLeaderSchedulerConfig
-	selector *selector.RandomSelector
+	conf    *shuffleLeaderSchedulerConfig
+	filters []filter.Filter
 }
 
 // newShuffleLeaderScheduler creates an admin scheduler that shuffles leaders
@@ -80,7 +79,7 @@ func newShuffleLeaderScheduler(opController *schedule.OperatorController, conf *
 	return &shuffleLeaderScheduler{
 		BaseScheduler: base,
 		conf:          conf,
-		selector:      selector.NewRandomSelector(filters),
+		filters:       filters,
 	}
 }
 
@@ -105,8 +104,9 @@ func (s *shuffleLeaderScheduler) Schedule(cluster opt.Cluster) []*operator.Opera
 	// 1. random select a valid store.
 	// 2. transfer a leader to the store.
 	schedulerCounter.WithLabelValues(s.GetName(), "schedule").Inc()
-	stores := cluster.GetStores()
-	targetStore := s.selector.SelectTarget(cluster, stores)
+	targetStore := filter.NewCandidates(cluster.GetStores()).
+		FilterTarget(cluster, s.filters...).
+		RandomPick()
 	if targetStore == nil {
 		schedulerCounter.WithLabelValues(s.GetName(), "no-target-store").Inc()
 		return nil
